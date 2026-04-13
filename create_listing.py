@@ -130,29 +130,60 @@ def draw_template(ctx, data, photo_surface=None):
     # BOTTOM BAR — dark navy band at the bottom of the image.
     # Change BOTTOM_BAR_H (line ~73) to make it taller/shorter.
     # ==================================================================
-    bottom_y = H - BOTTOM_BAR_H                       # top edge of the bar
-    ctx.set_source_rgba(*DEEP_BLUE, 0.88)              # 88% opacity navy
-    ctx.rectangle(0, bottom_y, W, BOTTOM_BAR_H)
-    ctx.fill()
+    bottom_y = H - BOTTOM_BAR_H                       # top edge of the bar (left side)
 
     # ==================================================================
-    # GOLD DIVIDER LINE — sits between the photo and the bottom bar.
+    # GOLD DIVIDER — inverted-S curve separating the photo from the panel.
     #
-    # ┌─────────────────────────────┐
-    # │         photo area          │
-    # ├═══ gold line (5px thick) ═══┤  ← gold_line_y
-    # │       bottom navy bar       │  ← bottom_y
-    # └─────────────────────────────┘
+    # Shape: straight horizontal for the first ~65 % of the width, then a
+    # smooth cubic-Bézier downward sweep (bottom half of an S) that ends
+    # ~40 px lower at the right edge.
     #
-    # To move the line UP:   decrease gold_line_y (e.g. bottom_y - 10*S)
-    # To move the line DOWN: increase gold_line_y (e.g. bottom_y + 5*S)
-    # To make it thicker:    increase gold_line_h
+    # ┌─────────────────────────────────────────────┐
+    # │            photo area                       │
+    # ├──────────────────────────╮                  │  ← straight + curve
+    #                             ╰─────────────────┤  ← curve end (40 px lower)
+    # │            dark panel                       │
+    # └─────────────────────────────────────────────┘
+    #
+    # To change the drop:         edit `curve_drop`   (final-image pixels)
+    # To change where curve starts: edit `curve_frac` (0–1 fraction of width)
+    # To make the line thicker:   edit `gold_line_h`
     # ==================================================================
-    gold_line_h = 5 * S                                # thickness of the line
-    gold_line_y = bottom_y - gold_line_h               # flush: line ends where bar begins
-    ctx.set_source(gold_gradient(ctx, 0, gold_line_y, W, gold_line_y))
-    ctx.rectangle(0, gold_line_y, W, gold_line_h + 2 * S)  # +2*S overlap into bar to avoid gap
+    gold_line_h  = 5 * S                              # stroke thickness
+    gold_line_y  = bottom_y - gold_line_h             # y at the LEFT edge (straight part)
+    curve_frac   = 0.65                               # fraction of width that stays straight
+    curve_drop   = 200 * S                             # how many px lower the right end lands
+
+    curve_start_x = curve_frac * W
+    span = W - curve_start_x
+    # Control points keep the tangent horizontal at both ends of the Bézier
+    cp1x = curve_start_x + 0.40 * span
+    cp1y = gold_line_y
+    cp2x = W - 0.40 * span
+    cp2y = gold_line_y + curve_drop
+    end_y = gold_line_y + curve_drop
+
+    # ── Dark panel fill — closed path with S-curve as the top edge ───────
+    ctx.new_path()
+    ctx.move_to(0, gold_line_y)
+    ctx.line_to(curve_start_x, gold_line_y)
+    ctx.curve_to(cp1x, cp1y, cp2x, cp2y, W, end_y)
+    ctx.line_to(W, H)
+    ctx.line_to(0, H)
+    ctx.close_path()
+    ctx.set_source_rgba(*DEEP_BLUE, 0.88)
     ctx.fill()
+
+    # ── Gold stroke along the S-curve ────────────────────────────────────
+    ctx.new_path()
+    ctx.move_to(0, gold_line_y)
+    ctx.line_to(curve_start_x, gold_line_y)
+    ctx.curve_to(cp1x, cp1y, cp2x, cp2y, W, end_y)
+    ctx.set_source(gold_gradient(ctx, 0, gold_line_y, W, end_y))
+    ctx.set_line_width(gold_line_h)
+    ctx.set_line_cap(cairo.LINE_CAP_BUTT)
+    ctx.stroke()
 
     # ==================================================================
     # TOP-LEFT PILL — "Property type" label (e.g. "Casa en Venta").
@@ -275,7 +306,9 @@ def draw_template(ctx, data, photo_surface=None):
     FEATURES_LOCATION_GAP = 14 * S     # ← gap between features and location
 
     bx = MARGIN                        # left margin for all bottom text
-    by = bottom_y + 24 * S             # start below the top edge of the bar
+    # The S-curve starts horizontal at gold_line_y on the left side, so anchor
+    # text to gold_line_y (not bottom_y) to stay inside the dark panel.
+    by = gold_line_y + gold_line_h + 24 * S  # start below the gold stroke
 
     # ── Price (gold gradient) ──
     price = data.get("price", "")
