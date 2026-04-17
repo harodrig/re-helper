@@ -8,13 +8,38 @@ import argparse
 import csv
 import os
 import sys
+import traceback
 from datetime import datetime
+
+
+# ── Error helpers ───────────────────────────────────────────────────────────
+# All non-fatal warnings go to stderr with a [WARN] prefix.
+# All fatal errors go to stderr with an [ERROR] prefix and exit with code != 0.
+# Success messages go to stdout with an [OK] prefix.
+# This makes it easy for the model to tell success from failure when it
+# captures combined output with `2>&1`.
+
+def log_ok(msg: str) -> None:
+    print(f"[OK] {msg}", file=sys.stdout, flush=True)
+
+def log_warn(msg: str) -> None:
+    print(f"[WARN] {msg}", file=sys.stderr, flush=True)
+
+def log_error(msg: str) -> None:
+    print(f"[ERROR] {msg}", file=sys.stderr, flush=True)
+
+def die(msg: str, code: int = 1) -> None:
+    log_error(msg)
+    sys.exit(code)
+
 
 try:
     import xlsxwriter
 except ImportError:
-    print("Instalando xlsxwriter...")
-    os.system(f"{sys.executable} -m pip install xlsxwriter --break-system-packages -q")
+    print("[INFO] Instalando xlsxwriter...", file=sys.stderr, flush=True)
+    rc = os.system(f"{sys.executable} -m pip install xlsxwriter --break-system-packages -q")
+    if rc != 0:
+        die("No se pudo instalar xlsxwriter. Revisa el venv y la conexión.", 2)
     import xlsxwriter
 
 
@@ -424,17 +449,20 @@ def cmd_agregar(args) -> None:
     }
     errors = validate_property(prop)
     if errors and not args.force:
-        print("⚠ Errores de validación:")
+        log_error("Errores de validación en los datos de la propiedad:")
         for e in errors:
-            print(f"   - {e}")
-        print("Use --force para guardar de todos modos.")
+            log_error(f"  - {e}")
+        log_error("Usa --force para guardar de todos modos.")
         sys.exit(1)
     if errors:
-        print("⚠ Guardando con advertencias:")
+        log_warn("Guardando con advertencias:")
         for e in errors:
-            print(f"   - {e}")
-    save_to_csv([prop], args.csv)
-    print(f"✓ Propiedad {args.id} guardada en {args.csv}")
+            log_warn(f"  - {e}")
+    try:
+        save_to_csv([prop], args.csv)
+    except OSError as exc:
+        die(f"No pude escribir el CSV en '{args.csv}': {exc}", 3)
+    log_ok(f"Propiedad {args.id} guardada en {args.csv}")
 
 
 def cmd_agregar_lote(args) -> None:
@@ -442,42 +470,46 @@ def cmd_agregar_lote(args) -> None:
     try:
         with open(args.archivo, encoding="utf-8") as f:
             data = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError) as exc:
-        print(f"⚠ Error al leer {args.archivo}: {exc}")
-        sys.exit(1)
+    except FileNotFoundError:
+        die(f"No existe el archivo JSON: {args.archivo}", 4)
+    except json.JSONDecodeError as exc:
+        die(f"El archivo JSON está mal formado ({args.archivo}): {exc}", 5)
     if not isinstance(data, list):
-        print("⚠ El archivo JSON debe contener una lista de objetos.")
-        sys.exit(1)
+        die("El archivo JSON debe contener una lista de objetos.", 6)
     saved = 0
     for i, item in enumerate(data, 1):
         prop = {k: str(item.get(k, "")) for k in HEADERS_EN}
         errors = validate_property(prop)
         if errors and not args.force:
-            print(f"⚠ Propiedad #{i} (ID={prop.get('id','?')}): errores de validación — omitida")
+            log_warn(f"Propiedad #{i} (ID={prop.get('id','?')}): errores de validación — omitida")
             for e in errors:
-                print(f"     - {e}")
+                log_warn(f"    - {e}")
             continue
-        save_to_csv([prop], args.csv)
+        try:
+            save_to_csv([prop], args.csv)
+        except OSError as exc:
+            die(f"No pude escribir el CSV en '{args.csv}': {exc}", 3)
         saved += 1
-    print(f"✓ {saved}/{len(data)} propiedades guardadas en {args.csv}")
+    log_ok(f"{saved}/{len(data)} propiedades guardadas en {args.csv}")
 
 
 def cmd_reporte(args) -> None:
     records = load_from_csv(args.csv)
     if not records:
-        print(f"⚠ No hay datos en {args.csv}. Agregue propiedades primero.")
-        sys.exit(1)
-    generate_xlsx(records, args.xlsx)
-    print(f"✓ Reporte generado: {args.xlsx}")
-    print(f"  Hojas: Resumen General, Por Tipo Propiedad, Por Transacción, Por Zona")
-    print(f"  Total propiedades: {len(records)}")
+        die(f"No hay datos en {args.csv}. Agrega propiedades primero.", 7)
+    try:
+        generate_xlsx(records, args.xlsx)
+    except OSError as exc:
+        die(f"No pude escribir el XLSX en '{args.xlsx}': {exc}", 3)
+    log_ok(f"Reporte generado: {args.xlsx}")
+    print(f"       Hojas: Resumen General, Por Tipo Propiedad, Por Transacción, Por Zona")
+    print(f"       Total propiedades: {len(records)}")
 
 
 def cmd_resumen(args) -> None:
     records = load_from_csv(args.csv)
     if not records:
-        print(f"⚠ No hay datos en {args.csv}.")
-        sys.exit(1)
+        die(f"No hay datos en {args.csv}.", 7)
     print(f"\n  Propiedades en CSV: {len(records)}")
     print(f"\n  Por tipo de propiedad:")
     for g, rows in group_by(records, "property_type").items():
@@ -491,8 +523,11 @@ def cmd_resumen(args) -> None:
 
 
 def cmd_ejemplo(args) -> None:
-    save_to_csv(SAMPLE_DATA, args.csv)
-    print(f"✓ {len(SAMPLE_DATA)} propiedades de ejemplo guardadas en {args.csv}")
+    try:
+        save_to_csv(SAMPLE_DATA, args.csv)
+    except OSError as exc:
+        die(f"No pude escribir el CSV en '{args.csv}': {exc}", 3)
+    log_ok(f"{len(SAMPLE_DATA)} propiedades de ejemplo guardadas en {args.csv}")
 
 
 def interactive_loop(csv_path: str, xlsx_path: str) -> None:
@@ -580,4 +615,15 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except SystemExit:
+        raise
+    except KeyboardInterrupt:
+        log_error("Interrumpido por el usuario.")
+        sys.exit(130)
+    except Exception as exc:
+        log_error(f"Error inesperado: {type(exc).__name__}: {exc}")
+        log_error("Traza completa:")
+        traceback.print_exc(file=sys.stderr)
+        sys.exit(99)
