@@ -42,10 +42,46 @@ import argparse
 import math
 import os
 import sys
+import traceback
 import xml.etree.ElementTree as ET
 
-import cairo
-from PIL import Image, ImageDraw, ImageFont
+
+# ── Error helpers ───────────────────────────────────────────────────────────
+# All non-fatal warnings go to stderr with a [WARN] prefix.
+# All fatal errors go to stderr with an [ERROR] prefix and exit with code != 0.
+# Success messages go to stdout with an [OK] prefix.
+# This mirrors inventory.py so the model can tell success from failure when
+# it captures combined output with `2>&1`.
+
+def log_ok(msg: str) -> None:
+    print(f"[OK] {msg}", file=sys.stdout, flush=True)
+
+def log_warn(msg: str) -> None:
+    print(f"[WARN] {msg}", file=sys.stderr, flush=True)
+
+def log_error(msg: str) -> None:
+    print(f"[ERROR] {msg}", file=sys.stderr, flush=True)
+
+def die(msg: str, code: int = 1) -> None:
+    log_error(msg)
+    sys.exit(code)
+
+
+try:
+    import cairo
+except ImportError as _exc:
+    print(f"[ERROR] Falta la librería pycairo. Instálala con: "
+          f"/home/harodrig/.openclaw/workspace/re-venv/bin/pip install pycairo",
+          file=sys.stderr, flush=True)
+    sys.exit(10)
+
+try:
+    from PIL import Image, ImageDraw, ImageFont
+except ImportError as _exc:
+    print(f"[ERROR] Falta la librería Pillow. Instálala con: "
+          f"/home/harodrig/.openclaw/workspace/re-venv/bin/pip install pillow",
+          file=sys.stderr, flush=True)
+    sys.exit(11)
 
 # ---------------------------------------------------------------------------
 # Constants — change these to adjust the overall layout
@@ -461,9 +497,22 @@ def draw_features_pil(pil_img, data):
 def generate_listing(data, output_path="listing.png"):
     photo_surface = None
     photo_path = data.get("photo")
-    if photo_path and os.path.isfile(photo_path):
-        pil_photo = Image.open(photo_path).convert("RGBA")
+    if photo_path:
+        if not os.path.isfile(photo_path):
+            die(f"No existe la foto indicada en --photo: '{photo_path}'. "
+                f"Revisa que la imagen esté en el folder correcto.", 12)
+        try:
+            pil_photo = Image.open(photo_path).convert("RGBA")
+        except Exception as exc:
+            die(f"No pude abrir la foto '{photo_path}': "
+                f"{type(exc).__name__}: {exc}", 13)
         photo_surface, _buf = _pil_to_cairo(pil_photo)
+
+    # Make sure the output folder exists before Cairo/PIL try to write.
+    out_dir = os.path.dirname(os.path.abspath(output_path))
+    if out_dir and not os.path.isdir(out_dir):
+        die(f"La carpeta de salida no existe: '{out_dir}'. "
+            f"Crea la carpeta con `mkdir -p` antes de ejecutar el script.", 14)
 
     surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, W, H)
     ctx = cairo.Context(surface)
@@ -474,8 +523,11 @@ def generate_listing(data, output_path="listing.png"):
     pil_img = Image.frombuffer("RGBA", (W, H), bytes(buf), "raw", "BGRA", 0, 1)
     pil_img = draw_features_pil(pil_img, data)
     pil_img = pil_img.resize((CANVAS, CANVAS), Image.LANCZOS)
-    pil_img.save(output_path, "PNG", optimize=True)
-    print(f"[OK] Listing saved to: {output_path}")
+    try:
+        pil_img.save(output_path, "PNG", optimize=True)
+    except OSError as exc:
+        die(f"No pude escribir el PNG en '{output_path}': {exc}", 15)
+    log_ok(f"Listing guardado: {output_path}")
     return output_path
 
 
@@ -597,10 +649,15 @@ def main():
 
     if args.xml:
         if not os.path.isfile(args.xml):
-            print(f"Error: XML file not found: {args.xml}", file=sys.stderr)
-            sys.exit(1)
-        data = parse_xml(args.xml)
-        print(f"[INFO] Loaded data from XML: {args.xml}")
+            die(f"No existe el archivo XML: {args.xml}", 16)
+        try:
+            data = parse_xml(args.xml)
+        except ET.ParseError as exc:
+            die(f"El archivo XML '{args.xml}' está mal formado: {exc}", 17)
+        except Exception as exc:
+            die(f"No pude leer el XML '{args.xml}': "
+                f"{type(exc).__name__}: {exc}", 17)
+        print(f"[INFO] Cargué datos desde XML: {args.xml}", file=sys.stderr, flush=True)
     else:
         data = {}
         for field in ["price", "title", "location", "rooms", "baths",
@@ -611,13 +668,23 @@ def main():
                 data[field] = val
 
     if not data:
-        print("Error: No data provided. Use --xml <file> or --price/--title/... flags.")
-        print("       Run with --sample-xml to see the XML format.")
-        print("       Run with -h for full help.")
-        sys.exit(1)
+        die("No se proporcionaron datos. Usa --xml <archivo> o los flags "
+            "--price/--title/etc. Ejecuta con --sample-xml para ver el "
+            "formato XML, o con -h para la ayuda completa.", 18)
 
     generate_listing(data, args.output)
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except SystemExit:
+        raise
+    except KeyboardInterrupt:
+        log_error("Interrumpido por el usuario.")
+        sys.exit(130)
+    except Exception as exc:
+        log_error(f"Error inesperado: {type(exc).__name__}: {exc}")
+        log_error("Traza completa:")
+        traceback.print_exc(file=sys.stderr)
+        sys.exit(99)
